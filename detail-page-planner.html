@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>상세페이지 자동 기획 시스템 | OA</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#07090f;font-family:'Apple SD Gothic Neo','Malgun Gothic','Noto Sans KR',sans-serif;color:#dde3ef}
+@keyframes spin      {from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+@keyframes hourglass {0%{transform:rotate(0deg)}45%{transform:rotate(0deg)}50%{transform:rotate(180deg)}95%{transform:rotate(180deg)}100%{transform:rotate(360deg)}}
+@keyframes pulse-dot {0%,80%,100%{transform:scale(0.6);opacity:0.3}40%{transform:scale(1);opacity:1}}
+@keyframes float     {0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+@keyframes fade-in   {from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes orbit     {from{transform:rotate(0deg) translateX(22px) rotate(0deg)}to{transform:rotate(360deg) translateX(22px) rotate(-360deg)}}
+@keyframes blink     {0%,100%{opacity:1}50%{opacity:0.2}}
+.spin  {animation:spin 1s linear infinite}
+.hglass{animation:hourglass 2s ease-in-out infinite}
+.float {animation:float 2.4s ease-in-out infinite}
+.fadein{animation:fade-in 0.4s ease both}
+.blink {animation:blink 1.4s ease infinite}
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:#090b14}
+::-webkit-scrollbar-thumb{background:#1a2a44;border-radius:4px}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const{useState,useRef,useEffect}=React;
+const MODEL="claude-sonnet-4-20250514";
+const API="https://api.anthropic.com/v1/messages";
+
+async function callClaude({messages,system="",useSearch=false,maxTokens=2000,apiKey}){
+  let msgs=[...messages];
+  for(let turn=0;turn<12;turn++){
+    const body={model:MODEL,max_tokens:maxTokens,messages:msgs};
+    if(system)body.system=system;
+    if(useSearch)body.tools=[{type:"web_search_20250305",name:"web_search"}];
+    const res=await fetch(API,{method:"POST",headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify(body)});
+    if(!res.ok){const e=await res.json().catch(()=>({}));throw new Error(e?.error?.message||`HTTP ${res.status}`);}
+    const data=await res.json();
+    if(data.error)throw new Error(data.error.message);
+    const stop=data.stop_reason;
+    const fullText=(data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n").trim();
+    if(stop==="end_turn")return fullText;
+    if(stop==="tool_use"){
+      const uses=(data.content||[]).filter(b=>b.type==="tool_use");
+      if(!uses.length)return fullText;
+      msgs=[...msgs,{role:"assistant",content:data.content},{role:"user",content:uses.map(b=>({type:"tool_result",tool_use_id:b.id,content:Array.isArray(b.content)?b.content:[{type:"text",text:String(b.content??"결과없음")}]}))}];
+      continue;
+    }
+    if(fullText)return fullText;
+    break;
+  }
+  return "";
+}
+
+async function callJSON(opts){const raw=await callClaude(opts);return extractJSON(raw);}
+
+function extractJSON(raw=""){
+  let t=raw.replace(/```json\s*/gi,"").replace(/```\s*/g,"").trim();
+  const ai=t.indexOf("["),ae=t.lastIndexOf("]");
+  if(ai!==-1&&ae>ai){try{return JSON.parse(t.slice(ai,ae+1));}catch{}}
+  const oi=t.indexOf("{"),oe=t.lastIndexOf("}");
+  if(oi!==-1&&oe>oi){try{return JSON.parse(t.slice(oi,oe+1));}catch{}}
+  try{return JSON.parse(t);}catch{}
+  throw new Error("JSON 파싱 실패 | 원문: "+t.slice(0,200));
+}
+
+function fileToBase64(file){
+  return new Promise((res,rej)=>{
+    const r=new FileReader();
+    r.onload=()=>res(r.result.split(",")[1]);
+    r.onerror=()=>rej(new Error("파일 읽기 실패"));
+    r.readAsDataURL(file);
+  });
+}
+
+function LoadingScreen({icon,title,subtitle,progress,logs=[]}){
+  const[dots,setDots]=useState("");
+  useEffect(()=>{
+    const t=setInterval(()=>setDots(d=>d.length>=3?"":d+"."),500);
+    return()=>clearInterval(t);
+  },[]);
+  return(
+    <div className="fadein" style={{textAlign:"center",padding:"48px 0"}}>
+      <div style={{position:"relative",width:80,height:80,margin:"0 auto 20px"}}>
+        <div style={{position:"absolute",inset:0,borderRadius:"50%",border:"2px dashed #1a2a44"}} className="spin"/>
+        <div style={{position:"absolute",inset:8,background:"#090d1a",borderRadius:"50%",border:"1px solid #1d4ed8",display:"flex",alignItems:"center",justifyContent:"center",fontSize:28}} className={icon==="⏳"?"hglass":"float"}>{icon}</div>
+        <div style={{position:"absolute",top:"50%",left:"50%",width:8,height:8,marginTop:-4,marginLeft:-4}}>
+          <div style={{width:8,height:8,background:"#2563eb",borderRadius:"50%",boxShadow:"0 0 8px #2563eb"}} className="orbit"/>
+        </div>
+      </div>
+      <h2 style={{fontSize:16,fontWeight:700,color:"#e2e8f0",margin:"0 0 6px"}}>{title}<span className="blink">{dots}</span></h2>
+      <p style={{color:"#3a506b",fontSize:11,margin:"0 0 22px"}}>{subtitle}</p>
+      {progress!=null?(
+        <div style={{width:260,margin:"0 auto 20px"}}>
+          <div style={{background:"#0a0d14",borderRadius:100,height:4,overflow:"hidden",marginBottom:6}}>
+            <div style={{height:"100%",borderRadius:100,background:"linear-gradient(90deg,#1e3a8a,#2563eb,#60a5fa)",width:`${progress}%`,transition:"width 0.5s ease",boxShadow:"0 0 8px #2563eb60"}}/>
+          </div>
+          <span style={{fontSize:10,color:"#1d4ed8"}}>{Math.round(progress)}%</span>
+        </div>
+      ):(
+        <div style={{display:"flex",justifyContent:"center",gap:6,marginBottom:20}}>
+          {[0,1,2].map(i=><div key={i} style={{width:7,height:7,borderRadius:"50%",background:"#2563eb",animation:`pulse-dot 1.2s ease-in-out ${i*0.2}s infinite`}}/>)}
+        </div>
+      )}
+      {logs.length>0&&(
+        <div style={{maxWidth:360,margin:"0 auto",textAlign:"left"}}>
+          {logs.slice(-4).map((log,i)=>(
+            <div key={i} className="fadein" style={{display:"flex",alignItems:"center",gap:8,padding:"3px 0",opacity:i===logs.slice(-4).length-1?1:0.4}}>
+              <span style={{color:i===logs.slice(-4).length-1?"#2563eb":"#1a2a44",fontSize:9}}>{i===logs.slice(-4).length-1?"▶":"✓"}</span>
+              <span style={{fontSize:10,color:i===logs.slice(-4).length-1?"#5a7a9a":"#1d2d40"}}>{log}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const CHANNELS=["쿠팡","네이버 스마트스토어","오늘의집","11번가"];
+const PHASES=["기술서","파싱","키워드","수집","분석","기획안"];
+const C={
+  head:{background:"linear-gradient(135deg,#0c1324,#0f172a)",borderBottom:"1px solid #141d2e",padding:"18px 28px"},
+  badge:{background:"#111d36",border:"1px solid #1d4ed8",color:"#60a5fa",fontSize:9,padding:"2px 7px",borderRadius:4,fontWeight:700},
+  prog:{background:"#08090e",borderBottom:"1px solid #0e1220",padding:"12px 28px"},
+  body:{maxWidth:900,margin:"0 auto",padding:"26px 28px"},
+  card:{background:"#0b0d16",border:"1px solid #101520",borderRadius:10,padding:"16px"},
+  lbl:{fontSize:11,fontWeight:700,color:"#3a506b",display:"block",marginBottom:8,textTransform:"uppercase",letterSpacing:"0.6px"},
+  row:{fontSize:11,color:"#4b6080",padding:"5px 0",borderBottom:"1px solid #0a0d14",display:"flex",alignItems:"flex-start",gap:6},
+  err:{background:"#130a0a",border:"1px solid #5c1d1d",borderRadius:8,padding:"11px 15px",marginBottom:18,color:"#fca5a5",fontSize:11},
+  tag:(col,bg)=>({padding:"4px 10px",borderRadius:6,fontSize:11,fontWeight:600,background:bg,border:`1px solid ${col}44`,color:col}),
+  pBtn:(d)=>({padding:"13px",fontSize:13,fontWeight:700,background:d?"#0c0f1a":"linear-gradient(135deg,#1a3d7c,#2563eb)",border:d?"1px solid #111827":"none",borderRadius:9,color:d?"#273449":"white",cursor:d?"not-allowed":"pointer",width:"100%"}),
+  gBtn:{padding:"11px 16px",background:"#090b14",border:"1px solid #111825",borderRadius:9,color:"#3a506b",fontSize:12,cursor:"pointer"},
+};
+
+function App(){
+  const[apiKey,setApiKey]=useState(()=>localStorage.getItem("oa_api_key")||"");
+  const[apiSaved,setApiSaved]=useState(()=>!!localStorage.getItem("oa_api_key"));
+  const[phase,setPhase]=useState("upload");
+  const[channels,setChannels]=useState(["쿠팡","네이버 스마트스토어"]);
+  const[imageFile,setImageFile]=useState(null);
+  const[imageB64,setImageB64]=useState("");
+  const[imageMime,setImageMime]=useState("");
+  const[imagePreview,setImagePreview]=useState("");
+  const[product,setProduct]=useState(null);
+  const[keywords,setKeywords]=useState(null);
+  const[competitors,setCompetitors]=useState([]);
+  const[selected,setSelected]=useState(new Set());
+  const[analysis,setAnalysis]=useState(null);
+  const[structure,setStructure]=useState("");
+  const[loading,setLoading]=useState(false);
+  const[msg,setMsg]=useState("");
+  const[loadLogs,setLoadLogs]=useState([]);
+  const[error,setError]=useState("");
+  const[rawLog,setRawLog]=useState("");
+  const[sortBy,setSortBy]=useState("reviews");
+  const[progress,setProgress]=useState({cur:0,total:0});
+  const[copied,setCopied]=useState(false);
+  const[tab,setTab]=useState("overview");
+  const[dragging,setDragging]=useState(false);
+  const[showApiInput,setShowApiInput]=useState(!localStorage.getItem("oa_api_key"));
+  const fileRef=useRef();
+
+  const phaseNum={upload:0,parsing:1,keywords:2,searching:3,results:3,analyzing:4,analysis:4,structure:5};
+  const curP=phaseNum[phase]??0;
+
+  const saveApiKey=()=>{localStorage.setItem("oa_api_key",apiKey);setApiSaved(true);setShowApiInput(false);};
+  const clearApiKey=()=>{localStorage.removeItem("oa_api_key");setApiKey("");setApiSaved(false);setShowApiInput(true);};
+  const toggleCh=ch=>setChannels(p=>p.includes(ch)?p.filter(c=>c!==ch):[...p,ch]);
+  const toggleSel=i=>setSelected(p=>{const n=new Set(p);n.has(i)?n.delete(i):n.add(i);return n;});
+
+  const handleFile=async(file)=>{
+    if(!file||!file.type.startsWith("image/")){setError("이미지 파일만 지원합니다");return;}
+    setError("");setImageFile(file);setImagePreview(URL.createObjectURL(file));setImageMime(file.type);
+    const b64=await fileToBase64(file);setImageB64(b64);
+  };
+  const onFileChange=e=>{if(e.target.files[0])handleFile(e.target.files[0]);};
+  const onDrop=e=>{e.preventDefault();setDragging(false);if(e.dataTransfer.files[0])handleFile(e.dataTransfer.files[0]);};
+  const onDragOver=e=>{e.preventDefault();setDragging(true);};
+  const onDragLeave=()=>setDragging(false);
+
+  const parseSpec=async()=>{
+    if(!imageB64||!apiKey)return;
+    setPhase("parsing");setLoading(true);setError("");setRawLog("");setLoadLogs(["이미지 업로드 확인 중...","AI 비전 모델 호출 중...","텍스트 추출 중..."]);
+    try{
+      const result=await callJSON({apiKey,messages:[{role:"user",content:[{type:"image",source:{type:"base64",media_type:imageMime,data:imageB64}},{type:"text",text:`이 이미지는 제품 기술서입니다. 이미지에서 모든 제품 정보를 읽어서 아래 JSON 형식으로 정리하라.\n확인되지 않는 항목은 "확인필요"로 표시.\n\n다음 JSON을 채워서만 출력 (설명 없음):\n{"product_name":"제품명","model_no":"모델번호","brand":"브랜드","category":"카테고리","price":"판매가","weight":"무게","size":"크기","material":"소재","color":"색상","certifications":["인증1"],"key_features":["핵심기능1","핵심기능2","핵심기능3"],"specs":{"항목명":"값"},"target":"추정타겟","channels":["판매채널"],"cautions":["주의사항1"],"components":["구성품1"],"origin":"제조국"}`}]}],system:"제품 기술서 분석 전문가. 이미지에서 텍스트를 정확히 읽어 JSON만 출력한다. 설명 없음.",maxTokens:2000});
+      setProduct(result);setPhase("parsed");
+    }catch(e){setError(`파싱 실패: ${e.message}`);setRawLog(e.message);setPhase("upload");}
+    setLoading(false);
+  };
+
+  const expandKeywords=async()=>{
+    setLoading(true);setMsg("키워드 확장 중...");setError("");setLoadLogs(["제품 정보 분석 중...","카테고리 파악 중...","검색 쿼리 생성 중..."]);
+    try{
+      const result=await callJSON({apiKey,messages:[{role:"user",content:`제품 정보:\n${JSON.stringify(product,null,2)}\n판매채널: ${channels.join(", ")}\n\n이 제품의 경쟁제품 조사를 위한 검색 키워드를 확장하라.\n다음 JSON을 채워서만 출력:\n{"main":["대표키워드1","대표키워드2","대표키워드3"],"category":["카테고리1","카테고리2"],"feature":["기능키워드1","기능키워드2","기능키워드3"],"queries":["실제검색쿼리1","실제검색쿼리2","실제검색쿼리3","실제검색쿼리4","실제검색쿼리5"]}`}],system:"이커머스 키워드 전문가. JSON만 출력. 설명 없음."});
+      setKeywords(result);setPhase("keywords");
+    }catch(e){setError(`키워드 확장 실패: ${e.message}`);}
+    setLoading(false);
+  };
+
+  const searchCompetitors=async()=>{
+    setPhase("searching");setCompetitors([]);setSelected(new Set());setError("");setLoadLogs([]);
+    const queries=keywords?.queries||[];
+    setProgress({cur:0,total:queries.length});
+    for(let i=0;i<queries.length;i++){
+      const q=queries[i];
+      setMsg(`"${q}" 검색 중... (${i+1}/${queries.length})`);
+      setLoadLogs(prev=>[...prev,`"${q}" 검색 중...`]);
+      setProgress({cur:i+1,total:queries.length});
+      try{
+        const arr=await callJSON({apiKey,messages:[{role:"user",content:`${channels.join(", ")}에서 "${q}" 키워드로 실제 판매 중인 경쟁 제품 2~3개를 웹에서 검색하라.\n없으면 [] 출력.\n다음 JSON 배열로만 출력:\n[{"name":"제품명","brand":"브랜드","price":가격숫자,"platform":"플랫폼","url":"URL","reviews":리뷰수,"rating":평점,"point":"핵심소구포인트","features":["특징1","특징2","특징3"],"sections":["섹션1","섹션2","섹션3"]}]`}],system:"이커머스 리서처. 웹 검색으로 실제 판매 제품 정보 수집. JSON 배열만 출력.",useSearch:true,maxTokens:2000});
+        if(Array.isArray(arr)&&arr.length>0){
+          setCompetitors(prev=>{const names=new Set(prev.map(p=>p.name));return[...prev,...arr.filter(p=>p?.name&&!names.has(p.name))];});
+        }
+      }catch(e){console.warn(`"${q}" 실패:`,e.message);}
+      await new Promise(r=>setTimeout(r,400));
+    }
+    setPhase("results");setLoading(false);
+  };
+
+  const analyzeCompetitors=async()=>{
+    setPhase("analyzing");setLoading(true);setMsg("분석 중...");setError("");setLoadLogs(["경쟁사 URL 수집 중...","상세페이지 구조 파악 중...","리뷰 키워드 분석 중..."]);
+    const targets=selected.size>0?competitors.filter((_,i)=>selected.has(i)):competitors.slice(0,4);
+    try{
+      const result=await callJSON({apiKey,messages:[{role:"user",content:`다음 경쟁 제품들의 상세페이지와 리뷰를 웹에서 검색·분석하라:\n${targets.map(c=>`- ${c.name} / ${c.brand} / ${c.platform} / ${c.url||""}`).join("\n")}\n\n다음 JSON을 채워서만 출력:\n{"common_sections":["섹션1","섹션2","섹션3","섹션4","섹션5"],"best_patterns":["패턴1","패턴2","패턴3"],"weaknesses":["약점1","약점2","약점3"],"review_keywords":["키워드1","키워드2","키워드3","키워드4","키워드5","키워드6"],"price_insight":"가격포지셔닝한문장","diff_points":["차별화1","차별화2","차별화3"],"recommended_flow":["섹션1","섹션2","섹션3","섹션4","섹션5","섹션6","섹션7","섹션8","섹션9","섹션10"]}`}],system:"이커머스 상세페이지 분석 전문가. 웹 검색 활용. JSON만 출력.",useSearch:true,maxTokens:2500});
+      setAnalysis(result);setPhase("analysis");
+    }catch(e){setError(`분석 실패: ${e.message}`);setRawLog(e.message);setPhase("results");}
+    setLoading(false);
+  };
+
+  const generateStructure=async()=>{
+    setLoading(true);setMsg("기획안 생성 중...");setError("");setLoadLogs(["제품 스펙 정리 중...","경쟁사 차별화 포인트 도출 중...","섹션별 카피 작성 중...","FAQ·주의사항 구성 중..."]);
+    try{
+      const text=await callClaude({apiKey,messages:[{role:"user",content:`당신은 이커머스 상세페이지 기획자 겸 카피라이터입니다.\n\n[우리 제품 기술서 정보]\n${JSON.stringify(product,null,2)}\n\n[경쟁사 분석 결과]\n${JSON.stringify(analysis,null,2)}\n\n[판매 채널]\n${channels.join(", ")}\n\n위 정보를 바탕으로 우리 제품의 이커머스 상세페이지 기획안을 마크다운으로 작성하라.\n\n작성 규칙:\n1. 제품기술서의 실제 스펙만 사용 (임의 수치 금지, 불확실하면 "확인필요" 표시)\n2. 흐름: 문제제기 → 해결책 제시 → 기능증명 → 구매설득\n3. 각 섹션 메인카피 + 서브카피 필수\n4. 경쟁사 약점 → 우리 강점으로 전환\n5. 이미지 연출 방향 및 프롬프트 포함\n6. FAQ, 주의사항, 스펙표 포함\n7. 마크다운 헤더(##, ###)로 구조화`}],system:"10년 경력 이커머스 상세페이지 기획자. 제품기술서 기반의 정확한 실전 기획안 작성.",maxTokens:4000});
+      setStructure(text);setPhase("structure");
+    }catch(e){setError(`기획안 생성 실패: ${e.message}`);}
+    setLoading(false);
+  };
+
+  const sorted=[...competitors].sort((a,b)=>{
+    if(sortBy==="reviews")return(b.reviews||0)-(a.reviews||0);
+    if(sortBy==="rating")return(b.rating||0)-(a.rating||0);
+    if(sortBy==="price_asc")return(a.price||0)-(b.price||0);
+    return(b.price||0)-(a.price||0);
+  });
+  const copyText=()=>{navigator.clipboard?.writeText(structure);setCopied(true);setTimeout(()=>setCopied(false),2000);};
+  const reset=()=>{setPhase("upload");setImageFile(null);setImageB64("");setImagePreview("");setProduct(null);setKeywords(null);setCompetitors([]);setSelected(new Set());setAnalysis(null);setStructure("");setError("");};
+
+  const SH=({emoji,title,sub})=>(
+    <div style={{marginBottom:22}}>
+      <h2 style={{fontSize:17,fontWeight:700,color:"#e2e8f0",margin:0}}>{emoji} {title}</h2>
+      {sub&&<p style={{color:"#3a506b",fontSize:11,marginTop:4,marginBottom:0}}>{sub}</p>}
+    </div>
+  );
+  const PBtn=({onClick,disabled,children,style:st={}})=>(
+    <button onClick={onClick} disabled={disabled} style={{...C.pBtn(disabled),...st}}>{children}</button>
+  );
+  const SpecRow=({label,value})=>(
+    <div style={{display:"flex",gap:8,padding:"6px 0",borderBottom:"1px solid #0a0d14"}}>
+      <span style={{fontSize:11,color:"#3a506b",minWidth:100,flexShrink:0}}>{label}</span>
+      <span style={{fontSize:11,color:"#8eaac5",flex:1,wordBreak:"break-all"}}>{value||"—"}</span>
+    </div>
+  );
+
+  return(
+    <div style={{minHeight:"100vh"}}>
+      {/* HEADER */}
+      <div style={C.head}>
+        <div style={{maxWidth:900,margin:"0 auto",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div>
+            <h1 style={{margin:0,fontSize:17,fontWeight:700,color:"#e2e8f0",display:"flex",alignItems:"center",gap:8}}>
+              📋 상세페이지 자동 기획 시스템 <span style={C.badge}>AI POWERED</span>
+            </h1>
+            <p style={{margin:"4px 0 0",color:"#3a506b",fontSize:11}}>제품기술서 이미지 → AI 파싱 → 경쟁제품 분석 → 상세페이지 기획안 자동 생성</p>
+          </div>
+          {/* API 키 상태 표시 */}
+          <button onClick={()=>setShowApiInput(v=>!v)} style={{padding:"6px 12px",background:apiSaved?"#011f14":"#130a0a",border:apiSaved?"1px solid #059669":"1px solid #5c1d1d",borderRadius:7,color:apiSaved?"#10b981":"#fca5a5",fontSize:10,cursor:"pointer",flexShrink:0}}>
+            {apiSaved?"🔑 API 연결됨":"⚠️ API 키 필요"}
+          </button>
+        </div>
+      </div>
+
+      {/* API 키 입력 패널 */}
+      {showApiInput&&(
+        <div style={{background:"#08090e",borderBottom:"1px solid #141d2e",padding:"14px 28px"}}>
+          <div style={{maxWidth:900,margin:"0 auto"}}>
+            <p style={{fontSize:11,color:"#3a506b",marginBottom:8}}>🔑 Anthropic API 키를 입력하세요. 키는 브라우저 로컬에만 저장됩니다.</p>
+            <div style={{display:"flex",gap:8}}>
+              <input
+                type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)}
+                placeholder="sk-ant-api03-..."
+                style={{flex:1,padding:"9px 12px",background:"#0a0d18",border:"1px solid #151e30",borderRadius:7,color:"#e2e8f0",fontSize:12,outline:"none"}}
+                onKeyDown={e=>e.key==="Enter"&&saveApiKey()}
+              />
+              <button onClick={saveApiKey} disabled={!apiKey} style={{padding:"9px 16px",background:apiKey?"linear-gradient(135deg,#1a3d7c,#2563eb)":"#0c0f1a",border:"none",borderRadius:7,color:apiKey?"white":"#273449",fontSize:12,cursor:apiKey?"pointer":"not-allowed",fontWeight:700}}>저장</button>
+              {apiSaved&&<button onClick={clearApiKey} style={{padding:"9px 12px",background:"#130a0a",border:"1px solid #5c1d1d",borderRadius:7,color:"#fca5a5",fontSize:11,cursor:"pointer"}}>삭제</button>}
+            </div>
+            <p style={{fontSize:10,color:"#1a2535",marginTop:6}}>API 키는 <a href="https://console.anthropic.com" target="_blank" style={{color:"#2563eb"}}>console.anthropic.com</a>에서 발급받을 수 있습니다.</p>
+          </div>
+        </div>
+      )}
+
+      {/* PROGRESS */}
+      <div style={C.prog}>
+        <div style={{maxWidth:900,margin:"0 auto",display:"flex",alignItems:"center"}}>
+          {PHASES.map((label,i)=>(
+            <div key={label} style={{display:"flex",alignItems:"center",flex:i<PHASES.length-1?1:"none"}}>
+              <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
+                <div style={{width:26,height:26,borderRadius:"50%",background:i<curP?"#1d4ed8":i===curP?"#0f2040":"#090b14",border:i===curP?"2px solid #2563eb":i<curP?"2px solid #1d4ed8":"2px solid #111825",display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontWeight:700,color:i<curP?"white":i===curP?"#60a5fa":"#1a2535"}}>
+                  {i<curP?"✓":i+1}
+                </div>
+                <span style={{fontSize:8,fontWeight:i===curP?700:400,color:i===curP?"#3b82f6":i<curP?"#253a55":"#111825"}}>{label}</span>
+              </div>
+              {i<PHASES.length-1&&<div style={{flex:1,height:1,margin:"0 2px 14px",background:i<curP?"#1d4ed8":"#0e1220"}}/>}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={C.body}>
+        {!apiSaved&&(
+          <div style={{...C.card,marginBottom:20,background:"#0c0a00",borderColor:"#2a1800",textAlign:"center",padding:"24px"}}>
+            <div style={{fontSize:32,marginBottom:10}}>🔑</div>
+            <p style={{color:"#f59e0b",fontSize:13,fontWeight:700,marginBottom:4}}>API 키를 먼저 입력해주세요</p>
+            <p style={{color:"#5a4a20",fontSize:11}}>우측 상단 버튼 또는 위 입력창에서 Anthropic API 키를 저장하면 사용 가능합니다.</p>
+          </div>
+        )}
+
+        {error&&(
+          <div style={C.err}>
+            ⚠️ {error}
+            {rawLog&&<details style={{marginTop:8}}><summary style={{cursor:"pointer"}}>원문 로그</summary><pre style={{marginTop:6,fontSize:9,color:"#7f1d1d",whiteSpace:"pre-wrap",wordBreak:"break-all"}}>{rawLog.slice(0,400)}</pre></details>}
+          </div>
+        )}
+
+        {/* UPLOAD */}
+        {phase==="upload"&&(
+          <div>
+            <SH emoji="📄" title="제품기술서 이미지 업로드" sub="기술서 이미지를 업로드하면 AI가 자동으로 제품 정보를 파싱합니다."/>
+            <div onDrop={onDrop} onDragOver={onDragOver} onDragLeave={onDragLeave} onClick={()=>fileRef.current?.click()} style={{border:dragging?"2px dashed #2563eb":"2px dashed #1a2535",borderRadius:12,padding:"36px 20px",textAlign:"center",background:dragging?"#080f1e":"#08090e",cursor:"pointer",transition:"all 0.2s",marginBottom:20}}>
+              <input ref={fileRef} type="file" accept="image/*" onChange={onFileChange} style={{display:"none"}}/>
+              {imagePreview?(
+                <div>
+                  <img src={imagePreview} alt="미리보기" style={{maxWidth:"100%",maxHeight:360,borderRadius:8,objectFit:"contain",marginBottom:12}}/>
+                  <p style={{color:"#3b82f6",fontSize:12,margin:0}}>✓ {imageFile?.name} — 클릭해서 변경</p>
+                </div>
+              ):(
+                <div>
+                  <div style={{fontSize:40,marginBottom:12}}>📷</div>
+                  <p style={{color:"#3a506b",fontSize:14,fontWeight:600,margin:"0 0 6px"}}>이미지를 드래그하거나 클릭해서 업로드</p>
+                  <p style={{color:"#1a2535",fontSize:11,margin:0}}>JPG, PNG, WEBP 지원 · 기술서 전체가 선명하게 보이는 이미지 권장</p>
+                </div>
+              )}
+            </div>
+            <div style={{marginBottom:24}}>
+              <label style={C.lbl}>판매 채널 선택</label>
+              <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+                {CHANNELS.map(ch=>(
+                  <button key={ch} onClick={()=>toggleCh(ch)} style={{padding:"7px 14px",borderRadius:7,fontSize:12,fontWeight:600,background:channels.includes(ch)?"#0f2040":"#090b14",border:channels.includes(ch)?"1px solid #1d4ed8":"1px solid #111825",color:channels.includes(ch)?"#60a5fa":"#2d4060",cursor:"pointer"}}>{ch}</button>
+                ))}
+              </div>
+            </div>
+            <PBtn onClick={parseSpec} disabled={!imageB64||!apiSaved||loading}>{loading?`⏳ ${msg}`:"🔍  기술서 자동 파싱 시작"}</PBtn>
+          </div>
+        )}
+
+        {phase==="parsing"&&<LoadingScreen icon="⏳" title="기술서 분석 중" subtitle="AI가 이미지에서 제품 스펙을 읽고 구조화하고 있습니다" logs={loadLogs}/>}
+
+        {/* PARSED */}
+        {phase==="parsed"&&product&&(
+          <div>
+            <SH emoji="✅" title="기술서 파싱 완료" sub="AI가 읽어낸 제품 정보입니다. 확인 후 경쟁제품 분석을 시작하세요."/>
+            <div style={{...C.card,marginBottom:16,background:"#090d1a",borderColor:"#1a2a44"}}>
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
+                {imagePreview&&<img src={imagePreview} style={{width:64,height:64,objectFit:"cover",borderRadius:6,border:"1px solid #1a2a44"}}/>}
+                <div>
+                  <div style={{fontSize:16,fontWeight:700,color:"#e2e8f0"}}>{product.product_name||"제품명 확인필요"}</div>
+                  <div style={{fontSize:11,color:"#3a506b",marginTop:2}}>{product.brand} · {product.model_no} · {product.origin}</div>
+                </div>
+                <div style={{marginLeft:"auto",textAlign:"right"}}>
+                  <div style={{fontSize:11,color:"#3a506b"}}>판매가</div>
+                  <div style={{fontSize:15,fontWeight:700,color:"#60a5fa"}}>{product.price||"확인필요"}</div>
+                </div>
+              </div>
+              <div style={{display:"flex",gap:5,marginBottom:12}}>
+                {[["overview","개요"],["specs","스펙"],["features","기능"],["cautions","주의"]].map(([id,label])=>(
+                  <button key={id} onClick={()=>setTab(id)} style={{padding:"5px 11px",borderRadius:6,fontSize:10,fontWeight:600,background:tab===id?"#0f2040":"#09090e",border:tab===id?"1px solid #2563eb":"1px solid #0e1220",color:tab===id?"#60a5fa":"#2d4060",cursor:"pointer"}}>{label}</button>
+                ))}
+              </div>
+              {tab==="overview"&&<div><SpecRow label="제품명" value={product.product_name}/><SpecRow label="모델번호" value={product.model_no}/><SpecRow label="브랜드" value={product.brand}/><SpecRow label="카테고리" value={product.category}/><SpecRow label="소재" value={product.material}/><SpecRow label="색상" value={product.color}/><SpecRow label="크기" value={product.size}/><SpecRow label="무게" value={product.weight}/><SpecRow label="제조국" value={product.origin}/><SpecRow label="인증" value={(product.certifications||[]).join(", ")}/><SpecRow label="구성품" value={(product.components||[]).join(", ")}/><SpecRow label="추정 타겟" value={product.target}/></div>}
+              {tab==="specs"&&<div>{product.specs&&Object.entries(product.specs).map(([k,v])=><SpecRow key={k} label={k} value={String(v)}/>)}</div>}
+              {tab==="features"&&<div>{(product.key_features||[]).map((f,i)=><div key={i} style={{...C.row,paddingLeft:4}}><span style={{color:"#2563eb",flexShrink:0,fontWeight:700,fontSize:10}}>0{i+1}</span><span style={{fontSize:12,color:"#7a9ab8"}}>{f}</span></div>)}</div>}
+              {tab==="cautions"&&<div>{(product.cautions||[]).map((c,i)=><div key={i} style={C.row}><span style={{color:"#f59e0b",flexShrink:0}}>⚠</span><span style={{fontSize:11,color:"#5a4a20"}}>{c}</span></div>)}</div>}
+            </div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:20}}>
+              {(product.key_features||[]).map(f=><span key={f} style={C.tag("#3b82f6","#0f2040")}>{f}</span>)}
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>setPhase("upload")} style={C.gBtn}>← 다시 업로드</button>
+              <PBtn onClick={expandKeywords} disabled={loading} style={{flex:1}}>{loading?`⏳ ${msg}`:"🔑  키워드 확장 & 경쟁제품 검색 시작"}</PBtn>
+            </div>
+          </div>
+        )}
+
+        {phase==="keywords"&&keywords&&(
+          <div>
+            <SH emoji="🏷️" title="키워드 확장 완료" sub="확인 후 경쟁제품 검색을 시작하세요."/>
+            <div style={{display:"flex",flexDirection:"column",gap:14,marginBottom:22}}>
+              {[["main","대표 키워드","#3b82f6","#0f2040"],["category","카테고리","#8b5cf6","#1e0f3a"],["feature","기능·특성","#10b981","#011f14"]].map(([key,label,col,bg])=>(
+                <div key={key}>
+                  <label style={C.lbl}>{label}</label>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:6}}>{(keywords[key]||[]).map(kw=><span key={kw} style={C.tag(col,bg)}>{kw}</span>)}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{...C.card,marginBottom:22}}>
+              <label style={C.lbl}>실제 검색 쿼리 ({(keywords.queries||[]).length}개)</label>
+              {(keywords.queries||[]).map((q,i)=><div key={i} style={C.row}><span style={{color:"#1d4ed8",fontWeight:700,fontSize:10,minWidth:20}}>{String(i+1).padStart(2,"0")}</span><span style={{fontSize:12,color:"#5a7a9a"}}>{q}</span></div>)}
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>setPhase("parsed")} style={C.gBtn}>← 제품정보</button>
+              <PBtn onClick={searchCompetitors} style={{flex:1}}>🔍  경쟁제품 검색 시작</PBtn>
+            </div>
+          </div>
+        )}
+
+        {phase==="searching"&&<LoadingScreen icon="🔍" title="경쟁제품 수집 중" subtitle={`${channels.join(", ")} 실시간 검색 중`} progress={progress.total?(progress.cur/progress.total)*100:5} logs={loadLogs}/>}
+
+        {phase==="results"&&(
+          <div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:18}}>
+              <div>
+                <h2 style={{fontSize:17,fontWeight:700,color:"#e2e8f0",margin:0}}>📦 경쟁제품 수집 완료 <span style={{color:"#2563eb"}}>({competitors.length}개)</span></h2>
+                <p style={{color:"#3a506b",fontSize:11,marginTop:4,marginBottom:0}}>{selected.size>0?`${selected.size}개 선택됨`:"분석 대상 선택 (미선택 시 상위 4개 자동)"}</p>
+              </div>
+              <div style={{display:"flex",gap:5}}>
+                {[["reviews","리뷰"],["rating","평점"],["price_asc","낮은가격"],["price_desc","높은가격"]].map(([v,l])=>(
+                  <button key={v} onClick={()=>setSortBy(v)} style={{padding:"5px 9px",borderRadius:6,fontSize:9,fontWeight:700,background:sortBy===v?"#0f2040":"#090b14",border:sortBy===v?"1px solid #1d4ed8":"1px solid #0e1520",color:sortBy===v?"#60a5fa":"#253545",cursor:"pointer"}}>{l}</button>
+                ))}
+              </div>
+            </div>
+            {competitors.length===0?(
+              <div style={{...C.card,textAlign:"center",padding:"36px",color:"#253545",marginBottom:16}}>수집된 제품이 없습니다.</div>
+            ):(
+              <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:18}}>
+                {sorted.map(c=>{
+                  const idx=competitors.indexOf(c);const sel=selected.has(idx);
+                  return(
+                    <div key={idx} onClick={()=>toggleSel(idx)} style={{background:sel?"#08111e":"#09090f",border:sel?"1px solid #1d4ed8":"1px solid #0e1220",borderRadius:9,padding:"13px 15px",cursor:"pointer",boxShadow:sel?"0 0 10px #2563eb18":"none",transition:"all 0.2s"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                        <div style={{flex:1}}>
+                          <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:5}}>
+                            <div style={{width:16,height:16,borderRadius:4,flexShrink:0,background:sel?"#1d4ed8":"#0e1525",border:sel?"2px solid #3b82f6":"2px solid #151e30",display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,color:"white",fontWeight:700}}>{sel&&"✓"}</div>
+                            <span style={{fontSize:13,fontWeight:700,color:"#d1ddf0"}}>{c.name}</span>
+                            <span style={{fontSize:9,fontWeight:700,padding:"2px 6px",borderRadius:3,background:c.platform?.includes("쿠팡")?"#3a1000":"#081830",color:c.platform?.includes("쿠팡")?"#f97316":"#3b82f6"}}>{c.platform}</span>
+                          </div>
+                          {c.point&&<p style={{margin:"0 0 7px 22px",fontSize:11,color:"#0d9f6e"}}>💡 {c.point}</p>}
+                          <div style={{display:"flex",flexWrap:"wrap",gap:4,marginLeft:22}}>
+                            {(c.features||[]).map(f=><span key={f} style={{padding:"2px 7px",background:"#0a0d14",border:"1px solid #0e1520",borderRadius:4,fontSize:9,color:"#334155"}}>{f}</span>)}
+                          </div>
+                        </div>
+                        <div style={{textAlign:"right",marginLeft:14,flexShrink:0}}>
+                          {c.price>0&&<div style={{fontSize:14,fontWeight:700,color:"#e2e8f0"}}>{c.price.toLocaleString()}원</div>}
+                          <div style={{fontSize:10,color:"#253545",marginTop:2}}>{c.rating?`⭐ ${c.rating}`:""}{c.reviews?` · ${c.reviews.toLocaleString()}리뷰`:""}</div>
+                          {c.url&&<a href={c.url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()} style={{fontSize:10,color:"#2563eb",textDecoration:"none",marginTop:4,display:"inline-flex",alignItems:"center",gap:3,padding:"2px 7px",background:"#080f1e",border:"1px solid #1a2a44",borderRadius:4}}>🔗 제품 보기 ↗</a>}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>setPhase("keywords")} style={C.gBtn}>← 키워드</button>
+              <PBtn onClick={analyzeCompetitors} disabled={competitors.length===0} style={{flex:1}}>📊  상세페이지 구조 분석{selected.size>0?` (선택 ${selected.size}개)`:""}</PBtn>
+            </div>
+          </div>
+        )}
+
+        {phase==="analyzing"&&<LoadingScreen icon="📊" title="경쟁사 상세페이지 분석 중" subtitle="섹션 구조 · 카피 패턴 · 리뷰 키워드 추출 중" logs={loadLogs}/>}
+        {phase==="analysis"&&loading&&<LoadingScreen icon="✍️" title="상세페이지 기획안 작성 중" subtitle="제품 스펙 × 경쟁사 분석 → 실전 카피 & 기획안 생성" logs={loadLogs}/>}
+
+        {phase==="analysis"&&!loading&&analysis&&(
+          <div>
+            <SH emoji="📊" title="경쟁사 분석 완료" sub="우리 제품 기술서 + 경쟁사 분석 결과로 기획안을 생성합니다."/>
+            <div style={{background:"#080e1c",border:"1px solid #1a2a44",borderRadius:8,padding:"10px 14px",marginBottom:14,display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:18}}>📋</span>
+              <div>
+                <span style={{fontSize:12,fontWeight:700,color:"#60a5fa"}}>{product?.product_name}</span>
+                <span style={{fontSize:10,color:"#3a506b",marginLeft:8}}>{(product?.key_features||[]).slice(0,3).join(" · ")}</span>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:6,marginBottom:14}}>
+              {[["sections","🏗️ 구조"],["patterns","✍️ 패턴"],["weak","⚠️ 약점"],["diff","🎯 차별화"]].map(([id,label])=>(
+                <button key={id} onClick={()=>setTab(id)} style={{padding:"7px 12px",borderRadius:7,fontSize:11,fontWeight:600,background:tab===id?"#0f2040":"#090b14",border:tab===id?"1px solid #2563eb":"1px solid #0e1220",color:tab===id?"#60a5fa":"#2d4060",cursor:"pointer"}}>{label}</button>
+              ))}
+            </div>
+            {tab==="sections"&&<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>{[["common_sections","공통 섹션 구조","#3b82f6"],["review_keywords","리뷰 키워드","#a78bfa"]].map(([key,label,col])=><div key={key} style={C.card}><label style={{...C.lbl,color:col}}>{label}</label>{(analysis[key]||[]).map((item,i)=><div key={i} style={C.row}><span style={{color:col,fontSize:8,marginTop:2}}>▸</span><span style={{fontSize:11,color:"#3a506b"}}>{item}</span></div>)}</div>)}</div>}
+            {tab==="patterns"&&<div style={{...C.card,marginBottom:14}}><label style={{...C.lbl,color:"#10b981"}}>효과적인 카피·구성 패턴</label>{(analysis.best_patterns||[]).map((item,i)=><div key={i} style={C.row}><span style={{fontSize:11,color:"#3a506b"}}>{i+1}. {item}</span></div>)}{analysis.price_insight&&<div style={{marginTop:12,padding:"10px 12px",background:"#090b14",borderRadius:6,fontSize:11,color:"#4b6080"}}>💰 {analysis.price_insight}</div>}</div>}
+            {tab==="weak"&&<div style={{...C.card,borderColor:"#1a1000",background:"#0c0a00",marginBottom:14}}><label style={{...C.lbl,color:"#f59e0b"}}>공통 약점 & 누락 요소</label>{(analysis.weaknesses||[]).map((item,i)=><div key={i} style={{...C.row,borderColor:"#12100a"}}><span style={{color:"#f59e0b",flexShrink:0}}>△</span><span style={{fontSize:11,color:"#5a4a20"}}>{item}</span></div>)}</div>}
+            {tab==="diff"&&<div style={{...C.card,borderColor:"#011f14",background:"#060f09",marginBottom:14}}><label style={{...C.lbl,color:"#10b981"}}>우리 제품 차별화 포인트</label>{(analysis.diff_points||[]).map((item,i)=><div key={i} style={{...C.row,borderColor:"#091409"}}><span style={{color:"#10b981",flexShrink:0}}>✓</span><span style={{fontSize:11,color:"#1a5c3a"}}>{item}</span></div>)}</div>}
+            {analysis.recommended_flow&&<div style={{...C.card,marginBottom:20}}><label style={{...C.lbl,color:"#60a5fa"}}>추천 섹션 흐름</label><div style={{display:"flex",flexWrap:"wrap",gap:5,alignItems:"center"}}>{analysis.recommended_flow.map((s,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:4}}><span style={{padding:"4px 8px",background:"#0a1220",border:"1px solid #1a2a44",borderRadius:5,fontSize:10,color:"#4b6080"}}><span style={{color:"#1d4ed8",marginRight:3,fontWeight:700}}>{i+1}</span>{s}</span>{i<analysis.recommended_flow.length-1&&<span style={{color:"#0e1525",fontSize:9}}>→</span>}</div>)}</div></div>}
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>setPhase("results")} style={C.gBtn}>← 수집 결과</button>
+              <PBtn onClick={generateStructure} disabled={loading} style={{flex:1}}>{loading?`⏳ ${msg}`:"✨  상세페이지 기획안 자동 생성"}</PBtn>
+            </div>
+          </div>
+        )}
+
+        {phase==="structure"&&structure&&(
+          <div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+              <div>
+                <h2 style={{fontSize:17,fontWeight:700,color:"#e2e8f0",margin:0}}>✅ 상세페이지 기획안 완성</h2>
+                <p style={{color:"#3a506b",fontSize:10,marginTop:3,marginBottom:0}}>제품기술서 기반 · {product?.product_name} · {channels.join(", ")}</p>
+              </div>
+              <button onClick={copyText} style={{padding:"7px 14px",background:copied?"#011f14":"#090b14",border:copied?"1px solid #059669":"1px solid #0e1220",borderRadius:7,color:copied?"#10b981":"#3a506b",fontSize:11,cursor:"pointer"}}>{copied?"✓ 복사됨":"📋 복사"}</button>
+            </div>
+            <div style={{background:"#07090d",border:"1px solid #0e1220",borderRadius:10,padding:"18px 22px",fontSize:11,lineHeight:1.9,color:"#5a7a9a",whiteSpace:"pre-wrap",maxHeight:560,overflowY:"auto"}}>
+              {structure}
+            </div>
+            <div style={{display:"flex",gap:8,marginTop:14}}>
+              <button onClick={()=>setPhase("analysis")} style={C.gBtn}>← 분석 결과</button>
+              <button onClick={reset} style={C.gBtn}>🔄 새 제품</button>
+              <PBtn onClick={generateStructure} disabled={loading} style={{flex:1}}>{loading?"⏳ 재생성 중...":"🔁 기획안 재생성"}</PBtn>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>
